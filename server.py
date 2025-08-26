@@ -1,6 +1,11 @@
 import struct
 from azure.identity import DefaultAzureCredential
 import pyodbc
+import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 class FastMCP:
     def __init__(self, name):
@@ -23,8 +28,10 @@ def _pack_token(string: str) -> bytes:
 
 SQL_COPT_SS_ACCESS_TOKEN = 1256
 
-SERVER = "s4wmuxdh4mqerkfjddraua2kni-k46ujidhbx6e5cv6qxljbxzwnq.datawarehouse.fabric.microsoft.com"
-DATABASE = "cms_lakehouse"
+# Get configuration from environment variables
+SERVER = os.getenv('DB_SERVER')
+DATABASE = os.getenv('DB_NAME')
+TABLE = os.getenv('DB_TABLE', 'cms_provider_drug_costs')  # Default table name if not specified
 CONNECTION_STRING = f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={SERVER};DATABASE={DATABASE};Encrypt=yes"
 
 credential = DefaultAzureCredential()
@@ -47,7 +54,7 @@ def get_table_info() -> str:
     """Get column information from the CMS provider drug costs table."""
     with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT TOP 1 * FROM [dbo].[cms_provider_drug_costs]")
+        cursor.execute(f"SELECT TOP 1 * FROM [dbo].[{TABLE}]")
         columns = [column[0] for column in cursor.description]
         return "Table columns:\n" + "\n".join(columns)
 
@@ -65,7 +72,7 @@ def get_top_prescribers(top: int = 10) -> str:
                 SUM([Tot_Clms]) as Total_Claims,
                 SUM([Tot_Drug_Cst]) as Total_Cost,
                 COUNT(DISTINCT [Brnd_Name]) as Unique_Brands
-            FROM [dbo].[cms_provider_drug_costs] 
+            FROM [dbo].[{TABLE}] 
             GROUP BY [Prscrbr_Full_Name], [Prscrbr_City], [Prscrbr_State_Abrvtn], [Prscrbr_Type]
             ORDER BY Total_Claims DESC;
         """)
