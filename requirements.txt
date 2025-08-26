@@ -1,3 +1,4 @@
 azure-identity==1.13.0
 pyodbc==4.0.39
 python-dotenv==1.0.0
+pytest==7.4.0
