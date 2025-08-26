@@ -45,10 +45,10 @@ class AzureSQLConnection(DatabaseConnection):
 
     def _setup_connection(self):
         """Set up the database connection parameters"""
-        # Get configuration from environment variables
-        self.server = os.getenv('DB_SERVER')
-        self.database = os.getenv('DB_NAME')
-        self.table = os.getenv('DB_TABLE')
+        # Get configuration from GitHub Actions environment variables or fallback to local .env
+        self.server = os.environ.get('DB_SERVER') or os.getenv('DB_SERVER')
+        self.database = os.environ.get('DB_NAME') or os.getenv('DB_NAME')
+        self.table = os.environ.get('DB_TABLE') or os.getenv('DB_TABLE')
 
         if not all([self.server, self.database, self.table]):
             raise ValueError("Required environment variables are not set")
