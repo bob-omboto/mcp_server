@@ -24,13 +24,14 @@ jobs:
       with:
         python-version: '3.x'
     
-    - name: Install ODBC Driver
+    - name: Install ODBC Driver and build dependencies
       run: |
         curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
         curl https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
         sudo apt-get update
         sudo ACCEPT_EULA=Y apt-get install -y msodbcsql18
         sudo apt-get install -y unixodbc-dev
+        sudo apt-get install -y g++ gcc python3-dev
         
     - name: Install dependencies
       run: |
