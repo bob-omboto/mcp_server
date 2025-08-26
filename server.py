@@ -1,13 +1,30 @@
+import os
 import struct
+from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
 import pyodbc
-import os
-from dotenv import load_dotenv
+from abc import ABC, abstractmethod
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Load environment variables from .env file
 load_dotenv()
 
+class DatabaseConnection(ABC):
+    """Abstract base class for database connections"""
+    @abstractmethod
+    def connect(self):
+        pass
+
+    @abstractmethod
+    def execute_query(self, query, params=None):
+        pass
+
 class FastMCP:
+    """Model Context Protocol Server Implementation"""
     def __init__(self, name):
         self.name = name
         self.tools = {}
@@ -18,188 +35,95 @@ class FastMCP:
             return func
         return decorator
 
-def _pack_token(string: str) -> bytes:
-    bytes_str = b""
-    for i in string.encode("utf-8"):
-        bytes_str += bytes({i})
-        bytes_str += bytes(1)
+# Initialize MCP server
 
-    return struct.pack("=i", len(bytes_str)) + bytes_str
+class AzureSQLConnection(DatabaseConnection):
+    """Azure SQL Database connection implementation"""
+    def __init__(self):
+        self.connection = None
+        self._setup_connection()
 
-SQL_COPT_SS_ACCESS_TOKEN = 1256
+    def _setup_connection(self):
+        """Set up the database connection parameters"""
+        # Get configuration from environment variables
+        self.server = os.getenv('DB_SERVER')
+        self.database = os.getenv('DB_NAME')
+        self.table = os.getenv('DB_TABLE')
 
-# Get configuration from environment variables
-SERVER = os.getenv('DB_SERVER')
-DATABASE = os.getenv('DB_NAME')
-TABLE = os.getenv('DB_TABLE', 'cms_provider_drug_costs')  # Default table name if not specified
-CONNECTION_STRING = f"DRIVER={{ODBC Driver 18 for SQL Server}};SERVER={SERVER};DATABASE={DATABASE};Encrypt=yes"
+        if not all([self.server, self.database, self.table]):
+            raise ValueError("Required environment variables are not set")
 
-credential = DefaultAzureCredential()
-token = credential.get_token("https://database.windows.net//.default")
-
-# This is needed on OSX/Linux, not sure about Windows
-# https://techcommunity.microsoft.com/blog/appsonazureblog/how-to-connect-azure-sql-database-from-python-function-app-using-managed-identit/3035595
-packed_access_token = _pack_token(token.token)
-
-attrs_before={
-    SQL_COPT_SS_ACCESS_TOKEN: packed_access_token
-}
-
-mcp = FastMCP("Fabric MCP Server Demo")
-
-
-# MCP tool to get table schema info
-@mcp.tool()
-def get_table_info() -> str:
-    """Get column information from the CMS provider drug costs table."""
-    with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"SELECT TOP 1 * FROM [dbo].[{TABLE}]")
-        columns = [column[0] for column in cursor.description]
-        return "Table columns:\n" + "\n".join(columns)
-
-@mcp.tool()
-def get_top_prescribers(top: int = 10) -> str:
-    """Fetch top N prescribers by total claims with their location and prescriber type."""
-    with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            SELECT TOP ({top}) 
-                [Prscrbr_Full_Name],
-                [Prscrbr_City],
-                [Prscrbr_State_Abrvtn],
-                [Prscrbr_Type],
-                SUM([Tot_Clms]) as Total_Claims,
-                SUM([Tot_Drug_Cst]) as Total_Cost,
-                COUNT(DISTINCT [Brnd_Name]) as Unique_Brands
-            FROM [dbo].[{TABLE}] 
-            GROUP BY [Prscrbr_Full_Name], [Prscrbr_City], [Prscrbr_State_Abrvtn], [Prscrbr_Type]
-            ORDER BY Total_Claims DESC;
-        """)
-        rows = cursor.fetchall()
-        return f"Returning top {top} prescribers by total claims:\n" + "\n".join(
-            f"{row[0]} ({row[3]}) - {row[1]}, {row[2]} - {row[4]:,} claims, ${row[5]:,.2f} total cost, {row[6]} unique brands" 
-            for row in rows
+        self.connection_string = (
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"SERVER={self.server};"
+            f"DATABASE={self.database};"
+            f"Encrypt=yes"
         )
 
-@mcp.tool()
-def get_top_states(top: int = 10) -> str:
-    """Fetch top N states by total claims with beneficiary metrics."""
-    with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            SELECT TOP ({top})
-                [Prscrbr_State_Abrvtn] as State,
-                COUNT(DISTINCT [Prscrbr_Full_Name]) as Unique_Prescribers,
-                SUM([Tot_Clms]) as Total_Claims,
-                SUM([Tot_Drug_Cst]) as Total_Cost,
-                SUM([Tot_Benes]) as Total_Beneficiary_Events,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(SUM([Tot_Clms]), 0) as Cost_Per_Claim,
-                SUM([Tot_Clms]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Claims_Per_Prescriber,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Cost_Per_Prescriber
-            FROM [dbo].[cms_provider_drug_costs]
-            GROUP BY [Prscrbr_State_Abrvtn]
-            ORDER BY Total_Claims DESC;
-        """)
-        rows = cursor.fetchall()
-        def format_number(value, format_spec, default=0):
-            if value is None:
-                value = default
-            return f"{value:{format_spec}}"
+    def connect(self):
+        """Establish database connection with Azure managed identity"""
+        try:
+            credential = DefaultAzureCredential()
+            token = credential.get_token("https://database.windows.net//.default")
+            
+            # Pack the access token
+            SQL_COPT_SS_ACCESS_TOKEN = 1256
+            packed_token = self._pack_token(token.token)
+            
+            # Connect with the token
+            self.connection = pyodbc.connect(
+                self.connection_string,
+                attrs_before={SQL_COPT_SS_ACCESS_TOKEN: packed_token}
+            )
+            return self.connection
+        except Exception as e:
+            logger.error(f"Failed to connect to database: {str(e)}")
+            raise
 
-        return f"Returning top {top} states by total claims:\n" + "\n".join(
-            f"{row[0]} - {row[1]:,} prescribers, {row[2]:,} claims, ${row[3]:,.2f} total cost\n" +
-            f"    Cost per claim: ${format_number(row[5], '.2f')}, " +
-            f"Claims per prescriber: {format_number(row[6], '.1f')}, " +
-            f"Cost per prescriber: ${format_number(row[7], ',.2f')}\n" +
-            f"    Total beneficiary events: {row[4]:,} (Note: May include repeat visits)"
-            for row in rows
-        )
+    def execute_query(self, query, params=None):
+        """Execute a query and return results"""
+        try:
+            with self.connect() as conn:
+                cursor = conn.cursor()
+                if params:
+                    cursor.execute(query, params)
+                else:
+                    cursor.execute(query)
+                return cursor.fetchall()
+        except Exception as e:
+            logger.error(f"Query execution failed: {str(e)}")
+            raise
 
-@mcp.tool()
-def get_top_cities(top: int = 20) -> str:
-    """Fetch top N cities by total claims with efficiency metrics."""
-    with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
-        cursor = conn.cursor()
-        cursor.execute(f"""
-            SELECT TOP ({top})
-                [Prscrbr_City],
-                [Prscrbr_State_Abrvtn],
-                COUNT(DISTINCT [Prscrbr_Full_Name]) as Unique_Prescribers,
-                SUM([Tot_Clms]) as Total_Claims,
-                SUM([Tot_Drug_Cst]) as Total_Cost,
-                SUM([Tot_Benes]) as Total_Beneficiary_Events,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(SUM([Tot_Clms]), 0) as Cost_Per_Claim,
-                SUM([Tot_Clms]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Claims_Per_Prescriber,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Cost_Per_Prescriber
-            FROM [dbo].[cms_provider_drug_costs]
-            GROUP BY [Prscrbr_City], [Prscrbr_State_Abrvtn]
-            ORDER BY Total_Claims DESC;
-        """)
-        rows = cursor.fetchall()
-        def format_number(value, format_spec, default=0):
-            if value is None:
-                value = default
-            return f"{value:{format_spec}}"
+    @staticmethod
+    def _pack_token(token: str) -> bytes:
+        """Pack the access token for SQL Server"""
+        bytes_str = b""
+        for i in token.encode("utf-8"):
+            bytes_str += bytes({i})
+            bytes_str += bytes(1)
+        return struct.pack("=i", len(bytes_str)) + bytes_str
 
-        return f"Returning top {top} cities by total claims:\n" + "\n".join(
-            f"{row[0]}, {row[1]} - {row[2]:,} prescribers, {row[3]:,} claims, ${row[4]:,.2f} total cost\n" +
-            f"    Cost per claim: ${format_number(row[6], '.2f')}, " +
-            f"Claims per prescriber: {format_number(row[7], '.1f')}, " +
-            f"Cost per prescriber: ${format_number(row[8], ',.2f')}\n" +
-            f"    Total beneficiary events: {row[5]:,} (Note: May include repeat visits)"
-            for row in rows
-        )
 
-@mcp.tool()
-def get_prescriber_types_summary() -> str:
-    """Get a summary of prescriber types with efficiency metrics."""
-    with pyodbc.connect(CONNECTION_STRING, attrs_before=attrs_before) as conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                [Prscrbr_Type],
-                COUNT(DISTINCT [Prscrbr_Full_Name]) as Unique_Prescribers,
-                SUM([Tot_Clms]) as Total_Claims,
-                SUM([Tot_Drug_Cst]) as Total_Cost,
-                SUM([Tot_Benes]) as Total_Beneficiary_Events,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(SUM([Tot_Clms]), 0) as Cost_Per_Claim,
-                SUM([Tot_Clms]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Claims_Per_Prescriber,
-                SUM([Tot_Drug_Cst]) * 1.0 / NULLIF(COUNT(DISTINCT [Prscrbr_Full_Name]), 0) as Cost_Per_Prescriber,
-                COUNT(DISTINCT [Brnd_Name]) as Unique_Brands,
-                SUM([Tot_Day_Suply]) * 1.0 / NULLIF(SUM([Tot_Clms]), 0) as Avg_Days_Per_Claim
-            FROM [dbo].[cms_provider_drug_costs]
-            GROUP BY [Prscrbr_Type]
-            ORDER BY Total_Claims DESC;
-        """)
-        rows = cursor.fetchall()
-        def format_number(value, format_spec, default=0):
-            if value is None:
-                value = default
-            return f"{value:{format_spec}}"
+def initialize_mcp():
+    """Initialize the MCP server with configured tools"""
+    mcp = FastMCP("Prescriber Analytics MCP")
+    db = AzureSQLConnection()
+    
+    @mcp.tool()
+    def get_schema_info() -> str:
+        """Get database schema information"""
+        try:
+            results = db.execute_query("SELECT column_name, data_type FROM INFORMATION_SCHEMA.COLUMNS WHERE table_name = ?", [db.table])
+            return "Schema:\n" + "\n".join(f"{col[0]}: {col[1]}" for col in results)
+        except Exception as e:
+            return f"Error retrieving schema: {str(e)}"
 
-        return "Summary of prescriber types:\n" + "\n".join(
-            f"{row[0]}: {format_number(row[1], ',', 0)} prescribers, {format_number(row[2], ',', 0)} claims, ${format_number(row[3], ',.2f', 0)} total cost\n" +
-            f"    Cost per claim: ${format_number(row[5], '.2f')}, " +
-            f"Claims per prescriber: {format_number(row[6], '.1f')}, " +
-            f"Cost per prescriber: ${format_number(row[7], ',.2f')}\n" +
-            f"    {format_number(row[8], '', 0)} unique brands prescribed, " +
-            f"{format_number(row[9], '.1f')} days supply per claim\n" +
-            f"    Total beneficiary events: {format_number(row[4], ',', 0)} (Note: May include repeat visits)"
-            for row in rows
-        )
+    return mcp
 
 
 if __name__ == "__main__":
-    # Test all tools
-    print("\nTop Prescribers:")
-    print(get_top_prescribers(10))
-    
-    print("\nTop States:")
-    print(get_top_states(10))
-    
-    print("\nTop Cities:")
-    print(get_top_cities(20))
-    
-    print("\nPrescriber Types Summary:")
-    print(get_prescriber_types_summary())
+    try:
+        mcp = initialize_mcp()
+        logger.info("MCP server initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize MCP server: {str(e)}")
